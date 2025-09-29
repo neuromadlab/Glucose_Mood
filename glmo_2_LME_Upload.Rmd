@@ -1,0 +1,805 @@
+---
+title: "glmo_LME"
+author: "Kristin"
+date: "2023-09-07"
+output: html_document
+---
+#packages
+```{r packages}
+rm(list=ls())
+
+#install.packages(c(
+#  "readxl","openxlsx","dplyr","ggplot2","lmerTest","lme4","misty","e1071"#,"mediation","tibble"))
+
+
+library(readxl)
+library(openxlsx)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(misty) # for function center
+library(car)
+library(MASS)
+library(mediation)
+
+```
+# function
+```{r function}
+
+pval_significance <- function(pvals) {
+  vapply(pvals, function(p) {
+    if (is.na(p)) return("")
+    else if (p < .001) return("***")
+    else if (p < .01) return("**")
+    else if (p < .05) return("*")
+    else return("") # or return("n.s.")
+  }, character(1))
+}
+
+
+set.seed(12)
+
+```
+# Flags
+```{r Flags}
+
+printTable            = 0
+RunMediation          = 0
+RunConfidenceInterval = 0
+computeIA             = 0
+```
+
+# load data
+```{r load Data}
+path_preprocData = "/Users/kristinkaduk/Library/CloudStorage/Dropbox/Postdoc/NeuroMADLAB_Tuebingen/Projekte/Glucose_Mood/Manuskript/Submission/2_EbioMedicine/Revision_DueTo090925/GitHub/"
+
+filename = "Tue009_GluMood"
+dR <- read_excel(paste0(path_preprocData, filename,".xlsx" )) 
+
+if(computeIA == 1){
+df_Select = read_excel(paste0(path_preprocData, "TUE009_InteroceptiveAcc_BMI_Age_HOMA.xlsx" )) 
+}
+
+
+```
+
+# Grand vs. Person-mean Standardisierung
+```{r Centering_Standardization}
+dR$z.logGlu    <- scale(dR$logGlu)
+attributes(dR$z.logGlu) = NULL
+dR$z.log_HOMA  <- scale(dR$log_HOMA)
+attributes(dR$z.log_HOMA) = NULL
+dR$z.BMI       <- scale(dR$BMI)
+attributes(dR$z.BMI ) = NULL
+
+dR$z.Age       <- scale(dR$Age)
+attributes(dR$z.Age ) = NULL
+
+dR$z.MetState  <- scale(dR$MetState)
+attributes(dR$z.MetState ) = NULL
+dR$gclogGlu <- center(dR$clogGlu, type = "CWC", cluster = dR$ID)
+
+dR$z.res_log_HOMA  <- scale(dR$res_log_HOMA)
+attributes(dR$z.res_log_HOMA ) = NULL
+```
+
+
+#Demographics
+```{r TableDemographics}
+unique_ids <- dR %>% 
+  dplyr::select(ID, Age,fSex, BMI) %>% 
+  distinct(ID, .keep_all = TRUE)
+
+length(unique_ids$ID)
+
+count_by_sex <- unique_ids %>% 
+  group_by(fSex) %>% 
+  summarise(Unique_IDs = n_distinct(ID))
+
+mean_age <- mean(unique_ids$Age, na.rm = TRUE)
+sd_age <- sd(unique_ids$Age, na.rm = TRUE)
+min(unique_ids$Age, na.rm = TRUE)
+max(unique_ids$Age, na.rm = TRUE)
+
+mean_BMI <- mean(unique_ids$BMI, na.rm = TRUE)
+sd_BMI <- sd(unique_ids$BMI, na.rm = TRUE)
+ min(unique_ids$BMI, na.rm = TRUE)
+ max(unique_ids$BMI, na.rm = TRUE)
+
+dR$timestamp_date <- as.Date(dR$timestamp_date)
+
+days_per_ID <- dR %>% 
+  group_by(ID) %>% 
+  summarise(Unique_Days = n_distinct(timestamp_date))
+
+mean_days = mean(days_per_ID$Unique_Days)
+sd_days = sd(days_per_ID$Unique_Days)
+
+print(paste("Mean number of days:", mean_days))
+print(paste("Standard deviation:", sd_days))
+```
+
+# Counts
+```{r Counts}
+
+Glucose_Count = dR%>%
+  dplyr::select(ID, cGlu)%>%
+  dplyr::group_by(ID) %>%
+  dplyr::summarize(glucose_count = n())
+sum(Glucose_Count$glucose_count)
+
+
+Ratings_Count = dR%>%
+  dplyr::select(ID, Hunger)%>%
+  dplyr::group_by(ID) %>%
+  dplyr::summarize(ratings_count = n())
+
+min(Ratings_Count$ratings_count)
+max(Ratings_Count$ratings_count)
+mean(Ratings_Count$ratings_count)
+sd(Ratings_Count$ratings_count)
+
+
+sum(Ratings_Count$ratings_count)
+```
+#  summary & skewness Glucose
+```{r summary_skewness}
+
+# Summary statistics for Glucose Levels
+glucose_stats <- dR %>% 
+  summarise(
+    Glucose_Range = range(Glu),  # Compute the range of glucose levels
+    Mean_Glucose = mean(Glu),   # Compute the mean of glucose levels
+    SD_Glucose = sd(Glu)        # Compute the standard deviation of glucose levels
+  )
+
+library(e1071)
+glucose_skewness <- dR %>%
+  group_by(ID) %>%
+  summarise(
+    Skewness_Glucose = skewness(Glu),  # Compute skewness for glucose levels
+    .groups = 'drop'  # Drop grouping for cleaner output
+  )
+
+
+```
+
+# Mediation model
+```{r Mediation}
+if (RunMediation == 1){
+library(lme4)
+set.seed(2025)
+#RANDOM INTERCEPT 
+# test that the treatment is a between-subject variable 
+out.fit_lmer <- lme4::lmer(MoodState ~  MetState  * z.logGlu + (1 +MetState * z.logGlu | ID) , data =dR )
+med.fit_lmer <- lme4::lmer(MetState  ~ z.logGlu + (1 | ID), data = dR)
+#debug(mediate)
+med.out_lmer <- mediate(med.fit_lmer, out.fit_lmer, treat = "z.logGlu", mediator = "MetState", sims = 10000, dropobs = T)
+
+summary(med.out_lmer)
+
+inherits(med.fit_lmer, "merMod") 
+getCall(med.out_lmer)[[1]]
+
+
+}
+```
+
+# Save mediation 
+```{r}
+if (RunMediation == 1){
+
+library(tibble)
+
+# Helper to safely extract fields that exist in the object
+get2 <- function(x, nm, default = NA_real_) {
+  if (!is.null(x[[nm]])) x[[nm]] else default
+}
+
+rows <- tribble(
+  ~label,                      ~est_f,     ~ci_f,        ~p_f,
+  "ACME (control)",            "d0",       "d0.ci",      "d0.p",
+  "ACME (treated)",            "d1",       "d1.ci",      "d1.p",
+  "ADE (control)",             "z0",       "z0.ci",      "z0.p",
+  "ADE (treated)",             "z1",       "z1.ci",      "z1.p",
+  "Total Effect",              "tau.coef", "tau.ci",     "tau.p",
+  "Prop. Mediated (control)",  "n0",       "n0.ci",      "n0.p",
+  "Prop. Mediated (treated)",  "n1",       "n1.ci",      "n1.p",
+  "ACME (average)",            "d.avg",    "d.avg.ci",   "d.avg.p",
+  "ADE (average)",             "z.avg",    "z.avg.ci",   "z.avg.p",
+  "Prop. Mediated (average)",  "n.avg",    "n.avg.ci",   "n.avg.p"
+)
+
+med_tab <- rows %>%
+  rowwise() %>%
+  mutate(
+    Estimate = get2(med.out_lmer, est_f),
+    CI_lower = {ci <- med.out_lmer[[ci_f]]; if (is.null(ci)) NA_real_ else ci[1]},
+    CI_upper = {ci <- med.out_lmer[[ci_f]]; if (is.null(ci)) NA_real_ else ci[2]},
+    p_value  = get2(med.out_lmer, p_f)
+  ) %>%
+  ungroup() %>%
+  # keep only rows that were actually computed by your model
+  filter(!is.na(Estimate)) %>%
+  dplyr::select(
+    Term = label,
+    Estimate,
+    Lower = CI_lower,
+    Upper = CI_upper,
+    p_value = p_value
+  )
+
+
+med_tab_fmt <- med_tab %>%
+  mutate(
+    # force 3 decimals for numeric columns
+    Estimate = formatC(Estimate, format = "f", digits = 3),
+    Lower    = formatC(Lower,    format = "f", digits = 3),
+    Upper    = formatC(Upper,    format = "f", digits = 3),
+
+    # pretty p-values + stars
+    p_value = case_when(
+      is.na(p_value)  ~ NA_character_,
+      p_value < .001  ~ "< 0.001",
+      p_value < .01   ~ "< 0.01",
+      TRUE            ~ sprintf("%.3f", p_value)
+    ),
+    Significance = pval_significance(p_value)
+  )
+write.xlsx(med_tab_fmt, paste0(path_Output, "Tables/mediation_summary_table.xlsx"))
+
+med_tab_fmt
+}
+```
+
+
+
+
+#LME prepare
+```{r LME_prepare}
+library(lmerTest)
+set.seed(12)
+control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e5)) # IMPORTANT!
+
+```
+
+# MAIN Mixed effect model 
+# 1. Part Glucose - Mood
+```{r LME - glu-Mood}
+# Mood improves with higher glucose levels
+# Glucose levels have no direct effect on Mood
+control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e5)) # IMPORTANT!
+formula <- MoodState ~ z.logGlu + (1 + z.logGlu|ID)
+fm_2 <- lmer(formula, dR, control=control)
+formula_terms <- all.vars(formula)
+
+fixed_effects <- data.frame(coef(summary(fm_2)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_2)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$df        <- round(fixed_effects$df, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+
+fixed_effects <- fixed_effects[c("Names", names(fixed_effects)[names(fixed_effects) != "Names"])]
+}
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_Mood_PrGlu_withoutCovariates.xlsx"))
+}
+
+
+control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e5)) # IMPORTANT!
+formula <- MoodState ~ z.logGlu * ( z.res_log_HOMA + cSex + z.BMI + z.Age) + (1 + z.logGlu|ID)
+fm_2 <- lmer(formula, dR, control=control)
+formula_terms <- all.vars(formula)
+
+fixed_effects_Cov <- data.frame(coef(summary(fm_2)))
+fixed_effects_Cov$star = pval_significance(fixed_effects_Cov$Pr...t..)
+names(fixed_effects_Cov)[5] = "Pvalue"
+fixed_effects_Cov$Names <- rownames(fixed_effects_Cov)
+fixed_effects_Cov <- fixed_effects_Cov[c("Names", names(fixed_effects_Cov)[names(fixed_effects_Cov) != "Names"])]
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_2)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects_Cov$Names <- rownames(fixed_effects_Cov)
+fixed_effects_Cov <- merge(fixed_effects_Cov, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects_Cov$Estimate  <- round(fixed_effects_Cov$Estimate, 3)
+fixed_effects_Cov$Std..Error <- round(fixed_effects_Cov$Std..Error, 3)
+fixed_effects_Cov$df        <- round(fixed_effects_Cov$df, 0)
+fixed_effects_Cov$Pvalue  <- round(fixed_effects_Cov$Pvalue, 3)
+fixed_effects_Cov$lower  <- round(fixed_effects_Cov$lower, 3)
+fixed_effects_Cov$upper  <- round(fixed_effects_Cov$upper, 3)
+fixed_effects_Cov$t.value  <- round(fixed_effects_Cov$t.value, 2)
+}
+
+if (printTable == 1){
+write.xlsx(fixed_effects_Cov, paste0(path_Output,"Tables/", "LME_Mood_PrGlu_withCovariates.xlsx"))
+}
+
+formula_happy <- Happy ~ z.logGlu * (z.res_log_HOMA + cSex + z.BMI + z.Age )+ (1 + z.logGlu|ID)
+fm_2_Happy <- lmer(formula_happy, dR, control=control)
+formula_terms <- all.vars(formula_happy)
+
+fixed_effects <- data.frame(coef(summary(fm_2_Happy)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- fixed_effects[c("Names", names(fixed_effects)[names(fixed_effects) != "Names"])]
+
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_2_Happy)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 2)
+fixed_effects$df        <- round(fixed_effects$df, 0)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+}
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_Happy_PrGlu.xlsx"))
+}
+
+
+## SAD
+formula <- Sad ~ z.logGlu * (z.res_log_HOMA + cSex + z.BMI + z.Age) + (1 + z.logGlu|ID)
+fm_2_Sad <- lmer(formula, dR, control=control)
+formula_terms <- all.vars(formula)
+ nobs(fm_2_Sad)
+
+fixed_effects <- data.frame(coef(summary(fm_2_Sad)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_2_Sad)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$df        <- round(fixed_effects$df, 0)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+}
+
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_Sad_PrGlu.xlsx"))
+}
+
+```
+
+
+
+# 2.1 Glucose & Metstate
+```{r LME_GluMetstate}
+# Is glucose associated with MetState? 
+control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e5)) # IMPORTANT!
+formula_MetState_FEGlu <- MetState ~ z.logGlu + (1 + z.logGlu|ID)
+fm_3_1 <- lmer(formula_MetState_FEGlu, dR, control=control)
+formula_terms <- all.vars(formula_MetState_FEGlu)
+fixed_effects <- data.frame(coef(summary(fm_3_1)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_3_1)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$df        <- round(fixed_effects$df, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+}
+#fixed_effects <- fixed_effects[c("Names", names(fixed_effects)[names(fixed_effects) != "Names"])]
+
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_MetState_PrGlu.xlsx"))
+}
+
+
+fm_3_2 <- lmer(MetState ~ z.logGlu *( z.res_log_HOMA + z.BMI + cSex + z.Age)  + (1 + z.logGlu|ID), dR, control=control) 
+fixeff_MetState <- data.frame(coef(summary(fm_3_2)))
+fixeff_MetState$star = pval_significance(fixeff_MetState$Pr...t..)
+names(fixeff_MetState)[5] = "Pvalue"
+fixeff_MetState$Names <- rownames(fixeff_MetState)
+fixeff_MetState <- fixeff_MetState[c("Names", names(fixeff_MetState)[names(fixeff_MetState) != "Names"])]
+fixeff_MetState$Pvalue = round(fixeff_MetState$Pvalue, 3)
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_3_2)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixeff_MetState$Names <- rownames(fixeff_MetState)
+fixeff_MetState <- merge(fixeff_MetState, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixeff_MetState$Estimate  <- round(fixeff_MetState$Estimate, 3)
+fixeff_MetState$Std..Error <- round(fixeff_MetState$Std..Error, 3)
+fixeff_MetState$df        <- round(fixeff_MetState$df, 0)
+fixeff_MetState$Pvalue  <- round(fixeff_MetState$Pvalue, 3)
+fixeff_MetState$lower  <- round(fixeff_MetState$lower, 3)
+fixeff_MetState$upper  <- round(fixeff_MetState$upper, 3)
+fixeff_MetState$t.value  <- round(fixeff_MetState$t.value, 2)
+}
+
+if (printTable == 1){
+write.xlsx(fixeff_MetState, paste0(path_Output,"Tables/", "LME_MetState_PrGlu_logHoma_zBMI_cSex_zAge.xlsx"))
+}
+
+
+dR$cSex # 0.5 is male
+dR$fSex
+# Create an interaction plot
+ggplot(dR, aes(x = BMI, y = MetState, color = as.factor(fSex))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", aes(group = interaction(fSex, cut(Age, 3))), se = FALSE) +
+  labs(x = "BMI", y = "Metstate", color = "Sex") +
+  facet_wrap(~ cut(Age, 3), labeller = label_both) +
+  theme_minimal()
+
+# Is glucose associated with Hunger? 
+fm_4 <- lmer(Hunger ~ z.logGlu * ( z.res_log_HOMA + z.BMI + cSex +z.Age) + (1 + z.logGlu|ID), dR) 
+fixeff_Hunger <- data.frame(coef(summary(fm_4)))
+fixeff_Hunger$star = pval_significance(fixeff_Hunger$Pr...t..)
+names(fixeff_Hunger)[5] = "Pvalue"
+fixeff_Hunger$Names <- rownames(fixeff_Hunger)
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_4)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixeff_Hunger$Names <- rownames(fixeff_Hunger)
+fixeff_Hunger <- merge(fixeff_Hunger, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixeff_Hunger$Estimate  <- round(fixeff_Hunger$Estimate, 3)
+fixeff_Hunger$Std..Error <- round(fixeff_Hunger$Std..Error, 2)
+fixeff_Hunger$df        <- round(fixeff_Hunger$df, 0)
+fixeff_Hunger$Pvalue  <- round(fixeff_Hunger$Pvalue, 3)
+fixeff_Hunger$lower  <- round(fixeff_Hunger$lower, 3)
+fixeff_Hunger$upper  <- round(fixeff_Hunger$upper, 3)
+fixeff_Hunger$t.value  <- round(fixeff_Hunger$t.value, 2)
+
+fixeff_Hunger <- fixeff_Hunger[c("Names", names(fixeff_Hunger)[names(fixeff_Hunger) != "Names"])]
+}
+
+if (printTable == 1){
+write.xlsx(fixeff_Hunger, paste0(path_Output,"Tables/", "LME_Hunger_PrGlu.xlsx"))
+}
+
+# Third Entry
+fm_3 <- lmer(Satiety ~ z.logGlu * (z.res_log_HOMA + z.BMI + cSex +z.Age) + (1 + z.logGlu|ID), dR) 
+fixeff_Satiety <- data.frame(coef(summary(fm_3)))
+fixeff_Satiety$star = pval_significance(fixeff_Satiety$Pr...t..)
+names(fixeff_Satiety)[5] = "Pvalue"
+fixeff_Satiety$Names <- rownames(fixeff_Satiety)
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_3)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixeff_Satiety$Names <- rownames(fixeff_Satiety)
+fixeff_Satiety <- merge(fixeff_Satiety, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixeff_Satiety$Estimate  <- round(fixeff_Satiety$Estimate, 3)
+fixeff_Satiety$Std..Error <- round(fixeff_Satiety$Std..Error, 3)
+fixeff_Satiety$df        <- round(fixeff_Satiety$df, 0)
+fixeff_Satiety$Pvalue  <- round(fixeff_Satiety$Pvalue, 3)
+fixeff_Satiety$lower  <- round(fixeff_Satiety$lower, 3)
+fixeff_Satiety$upper  <- round(fixeff_Satiety$upper, 3)
+fixeff_Satiety$t.value  <- round(fixeff_Satiety$t.value, 2)
+
+fixeff_Satiety <- fixeff_Satiety[c("Names", names(fixeff_Satiety)[names(fixeff_Satiety) != "Names"])]
+}
+
+if (printTable == 1){
+write.xlsx(fixeff_Satiety, paste0(path_Output,"Tables/", "LME_Satiety_PrGlu.xlsx"))
+}
+
+
+
+```
+
+# 2.2 MetState - Mood
+```{r LME_Metstate_Mood}
+
+formula <- MoodState ~ z.MetState + (1 + z.MetState |ID)
+fm_MoodState_Met <- lmer(formula, dR, control=control)
+formula_terms <- all.vars(formula)
+fixed_effects <- data.frame(coef(summary(fm_MoodState_Met)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_MoodState_Met)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$df        <- round(fixed_effects$df, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+}
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_Mood_PrMetState.xlsx"))
+}
+
+formula <- MoodState ~ z.MetState *(z.res_log_HOMA + z.BMI + cSex +z.Age) + (1 + z.MetState |ID)
+fm_MoodState_Met <- lmer(formula, dR, control=control)
+formula_terms <- all.vars(formula)
+fixed_effects <- data.frame(coef(summary(fm_MoodState_Met)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[5] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+if (RunConfidenceInterval == 1){
+
+Conf_1 = confint.merMod(object=fm_MoodState_Met)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$df        <- round(fixed_effects$df, 0)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+}
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_Mood_PrMetState_LogHOMA_cSex_zBMI_zAge.xlsx"))
+}
+
+```
+
+
+# 3. Interaction effect for Glu and Mood
+```{r LME_Mood_Glucose_Metstate}
+
+fm_1 <- lmer(MoodState ~ z.MetState * z.logGlu * (z.res_log_HOMA + cSex + z.BMI + z.Age)  + (1 + z.MetState * z.logGlu|ID), dR, control=control)
+
+fixed_effects_scale <- data.frame(coef(summary(fm_1)))
+fixed_effects_scale$star = pval_significance(fixed_effects_scale$Pr...t..)
+names(fixed_effects_scale)[5] = "Pvalue"
+fixed_effects_scale$Names <- rownames(fixed_effects_scale)
+fixed_effects_scale <- fixed_effects_scale[c("Names", names(fixed_effects_scale)[names(fixed_effects_scale) != "Names"])]
+
+if (RunConfidenceInterval == 1){
+Conf_1 = confint.merMod(object=fm_1)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects_scale$Names <- rownames(fixed_effects_scale)
+fixed_effects_scale <- merge(fixed_effects_scale, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects_scale$Estimate  <- round(fixed_effects_scale$Estimate, 3)
+fixed_effects_scale$Std..Error <- round(fixed_effects_scale$Std..Error, 3)
+fixed_effects_scale$df        <- round(fixed_effects_scale$df, 3)
+fixed_effects_scale$Pvalue  <- round(fixed_effects_scale$Pvalue, 3)
+fixed_effects_scale$lower  <- round(fixed_effects_scale$lower, 3)
+fixed_effects_scale$upper  <- round(fixed_effects_scale$upper, 3)
+fixed_effects_scale$t.value  <- round(fixed_effects_scale$t.value, 2)
+f = fixed_effects_scale 
+}
+
+if (printTable == 1){
+ write.xlsx(fixed_effects_scale, paste0(path_Output,"Tables/", "LME_Mood_PrMetState_Glu_log_HOMA_cSex_cBMI_Age_Standardized.xlsx"))
+}
+
+
+```
+# 4.Create Dataset with Interoceptive Acc MetState & Glu (slope per person) interoception
+```{r ComputeInteroception}
+dR$z.logGlu       = as.numeric(dR$z.logGlu)
+dR$z.MetState     = as.numeric(dR$z.MetState)
+dR$z.MetState_revCoded = dR$z.MetState*-1
+
+fm_5 <- lmer(z.logGlu ~ z.MetState_revCoded + (1 + z.MetState_revCoded|ID), dR) 
+fixeff_MetSt <- data.frame(coef(summary(fm_5)))
+fixeff_MetSt$star = pval_significance(fixeff_MetSt$Pr...t..)
+names(fixeff_MetSt)[5] = "Pvalue"
+fixeff_MetSt$Names <- rownames(fixeff_MetSt)
+fixeff_MetSt <- fixeff_MetSt[c("Names", names(fixeff_MetSt)[names(fixeff_MetSt) != "Names"])]
+
+coeffi      = coef(fm_5) # subject-specific estimates
+
+Slope_MetState  <- coeffi$ID$z.MetState_revCoded
+ranef_fm        <- tibble(ID = rownames( coeffi$ID), Slope_MetState)
+
+dR_short = dR%>%
+  dplyr::select(ID, MoodState , z.logGlu,clogGlu,  res_log_HOMA, BMI, Sex_male, cSex,fSex, log_HOMA, z.MetState,z.MetState_revCoded, z.res_log_HOMA, z.BMI,b_log_HOMA,log_HOMA,HOMA_IR_median,  z.Age, Age)
+
+dR_s_merged  <- merge(dR_short, ranef_fm, by = "ID")
+
+dR_s_merged = dR_s_merged%>%
+  group_by(ID)%>%
+  mutate(meanMood = mean(MoodState), 
+            sdMood = sd(MoodState))
+
+Slope_MetState[1:5]
+
+dR_s_merged$fID = as.factor(dR_s_merged$ID)
+df_Select = dR_s_merged%>%
+  dplyr::select(meanMood , sdMood, z.res_log_HOMA, res_log_HOMA, Slope_MetState, z.BMI, BMI, cSex,fSex, ID,fID, b_log_HOMA, log_HOMA,HOMA_IR_median,  z.Age, Age)%>%
+  distinct(ID, .keep_all = TRUE)
+```
+# Save Interoceptive Acc - Dataset
+```{r SaveInteroception}
+if (printTable == 1){
+openxlsx::write.xlsx(df_Select, paste0(path_preprocData, "TUE009_InteroceptiveAcc_BMI_Age_HOMA.xlsx"))
+  
+}
+```
+
+
+
+# 5.Interoceptive Accuracy(Slope_MetState) - BMI and ISI
+```{r InteroceptiveAcc}
+
+formula_Slope_MetState <- Slope_MetState ~  z.res_log_HOMA * z.BMI * cSex * z.Age
+
+lm_Slope_MetState            <- lm(formula_Slope_MetState, df_Select)
+formula_terms   <- all.vars(formula_Slope_MetState)
+fixed_effects   <- data.frame(coef(summary(lm_Slope_MetState)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[4] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+
+Conf_1 = confint(object=lm_Slope_MetState)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_SlopeMetStateInteroceAcc_BMI_HOMA_AGE_SEx.xlsx"))
+}
+summary(lm_Slope_MetState)$df #82
+
+```
+# 6. mean/ sd Mood - Interoceptive Acc
+```{r mean_SdMood}
+mean(df_Select$z.Slope_MetState)
+mean(df_Select$Slope_MetState)
+
+df_Select$z.Slope_MetState = scale(df_Select$Slope_MetState) 
+attributes(df_Select$z.Slope_MetState) = NULL
+
+
+formula_meanMood <- meanMood ~  z.Slope_MetState * ( z.BMI + cSex +z.Age)
+
+fm_meanMood <- lm(formula_meanMood, df_Select)
+formula_terms <- all.vars(formula_meanMood)
+fixed_effects <- data.frame(coef(summary(fm_meanMood)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[4] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+Conf_1 = confint(object=fm_meanMood)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_meanMood_PrSlopeMetStateInteroceAcc.xlsx"))
+}
+
+
+formula_sdMood <- sdMood ~  z.Slope_MetState  * ( z.BMI + cSex +z.Age)
+fm_sdMood <- lm(formula_sdMood, df_Select)
+formula_terms <- all.vars(formula_sdMood)
+fixed_effects <- data.frame(coef(summary(fm_sdMood)))
+fixed_effects$star = pval_significance(fixed_effects$Pr...t..)
+names(fixed_effects)[4] = "Pvalue"
+fixed_effects$Names <- rownames(fixed_effects)
+
+Conf_1 = confint(object=fm_sdMood)
+Conf_1 = data.frame(Conf_1)
+colnames(Conf_1) <- c("lower", "upper")
+Conf_1$Names <- rownames(Conf_1)
+
+fixed_effects$Names <- rownames(fixed_effects)
+fixed_effects <- merge(fixed_effects, Conf_1[, c("Names", "lower", "upper")], by = "Names", all.x = TRUE)
+
+fixed_effects$Estimate  <- round(fixed_effects$Estimate, 3)
+fixed_effects$Std..Error <- round(fixed_effects$Std..Error, 3)
+fixed_effects$Pvalue  <- round(fixed_effects$Pvalue, 3)
+fixed_effects$lower  <- round(fixed_effects$lower, 3)
+fixed_effects$upper  <- round(fixed_effects$upper, 3)
+fixed_effects$t.value  <- round(fixed_effects$t.value, 2)
+
+summary(fm_sdMood)$df #82
+if (printTable == 1){
+write.xlsx(fixed_effects, paste0(path_Output,"Tables/", "LME_sdMood_PrSlopeMetStateInteroceAcc.xlsx"))
+}
+```
+
+
+
